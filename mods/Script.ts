@@ -1,5 +1,10 @@
 import * as modlib from "modlib";
 
+// ===============================
+// Combined TS/JS Contents
+// ===============================
+
+// ---- Script.ts ----
 // Team IDs used by Portal. Change these only if your experience uses custom team routing.
 const TEAM_1_ID = 1;
 const TEAM_2_ID = 2;
