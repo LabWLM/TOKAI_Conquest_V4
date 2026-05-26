@@ -4,8 +4,8 @@ import * as modlib from "modlib";
 const TEAM_1_ID = 1;
 const TEAM_2_ID = 2;
 const NEUTRAL_TEAM_ID = 0;
-const TEAM_1_SWITCHER_INTERACT_ID = 999;
-const TEAM_2_SWITCHER_INTERACT_ID = 998;
+const TEAM_1_SWITCHER_INTERACT_ID = 998;
+const TEAM_2_SWITCHER_INTERACT_ID = 999;
 
 // Object ID layout used by the original visual script.
 // Capture points are expected to start at 200: A=200, B=201, C=202, and so on.
@@ -34,8 +34,8 @@ const TOTAL_CONTROL_BONUS = 10;
 // Capture and neutralization times for every objective, in seconds.
 const FLAG_CAPTURE_TIME_SECONDS = 15;
 const FLAG_NEUTRAL_TIME_SECONDS = 20;
-// Custom AI is disabled by default because Portal can throw OutOfAISpawnQuota when the server already has AI.
-const MAX_CUSTOM_AI = 36;
+const MAX_TOTAL_PLAYERS = 52;
+const MAX_CUSTOM_AI = 51;
 const MAX_RECON_DRONES_PER_SQUAD = 1;
 // Scoreboard column index used for sorting. Column 1 is Score.
 const SCOREBOARD_SORT_COLUMN = 1;
@@ -199,6 +199,8 @@ type PlayerState = {
     vehicleStartPosition?: mod.Vector;
     vehicleEnteredAt: number;
     aiActionUntil: number;
+    blockReviveUntilDeploy: boolean;
+    deployed: boolean;
 };
 
 type ConquestState = {
@@ -290,6 +292,8 @@ function defaultPlayerState(): PlayerState {
         aiInAction: false,
         vehicleEnteredAt: -1,
         aiActionUntil: -1,
+        blockReviveUntilDeploy: false,
+        deployed: false,
     };
 }
 
@@ -348,9 +352,12 @@ function getTeamScore(teamValue: mod.Team): number {
 }
 
 function canSwitchToTeam(player: mod.Player, targetTeam: mod.Team): boolean {
-    const currentTeam = mod.GetTeam(player);
-    if (mod.Equals(currentTeam, targetTeam)) return false;
-    return getTeamScore(currentTeam) > getTeamScore(targetTeam);
+    const currentTeamId = teamId(mod.GetTeam(player));
+    const targetTeamId = teamId(targetTeam);
+    if (currentTeamId === targetTeamId) return false;
+    if (currentTeamId === TEAM_1_ID && targetTeamId === TEAM_2_ID) return state.team1Score > state.team2Score;
+    if (currentTeamId === TEAM_2_ID && targetTeamId === TEAM_1_ID) return state.team2Score > state.team1Score;
+    return false;
 }
 
 function setTeamScore(teamValue: mod.Team, score: number): void {
@@ -509,7 +516,7 @@ function countPlayersInArray(players: PlayerCollection, owner: mod.Team): number
 
     for (let i = 0; i < countPlayers(players); i += 1) {
         const player = playerValue(players, i);
-        if (mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive) && mod.Equals(mod.GetTeam(player), owner)) count += 1;
+        if (safeGetSoldierState(player, mod.SoldierStateBool.IsAlive) && mod.Equals(mod.GetTeam(player), owner)) count += 1;
     }
 
     return count;
@@ -521,6 +528,57 @@ function countPlayers(players: PlayerCollection): number {
 
 function playerValue(players: PlayerCollection, index: number): mod.Player {
     return Array.isArray(players) ? players[index] : portalArrayValue<mod.Player>(players, index);
+}
+
+function safeGetSoldierState(player: mod.Player, state: mod.SoldierStateBool): boolean {
+    if (!mod.IsPlayerValid(player)) return false;
+    if (!playerState(player).deployed) return false;
+    try {
+        return mod.GetSoldierState(player, state);
+    } catch (_error) {
+        void _error;
+        return false;
+    }
+}
+
+function safeHasEquipment(player: mod.Player, gadget: mod.Gadgets): boolean {
+    if (!mod.IsPlayerValid(player)) return false;
+    if (!playerState(player).deployed) return false;
+    try {
+        return mod.HasEquipment(player, gadget);
+    } catch (_error) {
+        void _error;
+        return false;
+    }
+}
+
+function safeRemoveEquipment(player: mod.Player, gadget: mod.Gadgets): void {
+    if (!mod.IsPlayerValid(player)) return;
+    if (!playerState(player).deployed) return;
+    try {
+        mod.RemoveEquipment(player, gadget);
+    } catch (_error) {
+        void _error;
+    }
+}
+
+function safeForceManDown(player: mod.Player): void {
+    if (!mod.IsPlayerValid(player)) return;
+    if (!playerState(player).deployed) return;
+    try {
+        mod.ForceManDown(player);
+    } catch (_error) {
+        void _error;
+    }
+}
+
+function safeForcePlayerExitVehicle(player: mod.Player): void {
+    if (!safeGetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) return;
+    try {
+        mod.ForcePlayerExitVehicle(player, mod.GetVehicleFromPlayer(player));
+    } catch (_error) {
+        void _error;
+    }
 }
 
 function pointOccupancy(point: mod.CapturePoint): PointOccupancy {
@@ -601,7 +659,7 @@ function enemyCountForTeam(occupancy: PointOccupancy, teamValue: mod.Team): numb
 }
 
 function playerCanShowCaptureHud(player: mod.Player): boolean {
-    return mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAlive);
+    return safeGetSoldierState(player, mod.SoldierStateBool.IsAlive);
 }
 
 function resetPlayerCaptureHudCache(player: mod.Player): void {
@@ -951,6 +1009,10 @@ function setSizeAndPositionIfPresent(name: string, size: mod.Vector, position: m
     const widget = find(name);
     mod.SetUIWidgetSize(widget, size);
     mod.SetUIWidgetPosition(widget, position);
+}
+
+function setWidgetVisibleIfPresent(name: string, visible: boolean): void {
+    if (mod.HasUIWidgetWithName(name)) mod.SetUIWidgetVisible(find(name), visible);
 }
 
 function ticketBarWidth(score: number, startingScore: number): number {
@@ -1371,6 +1433,7 @@ function maybeRunAI(): void {
     state.lastAITick = elapsed;
 
     const allPlayers = mod.AllPlayers();
+    if (countPortalArray(allPlayers) >= MAX_TOTAL_PLAYERS) return;
     const aiCount = countAIPlayers(allPlayers);
     if (aiCount >= MAX_CUSTOM_AI) return;
 
@@ -1401,14 +1464,14 @@ function maybeIssueAIOrders(): void {
     const players = mod.AllPlayers();
     for (let i = 0; i < countPortalArray(players); i += 1) {
         const player = portalArrayValue<mod.Player>(players, i);
-        if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
+        if (!safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) continue;
         updateAITimedState(player);
         sendAIToObjective(player);
     }
 }
 
 function updateAITimedState(player: mod.Player): void {
-    if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    if (!safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
     const current = playerState(player);
     const elapsed = mod.GetMatchTimeElapsed();
 
@@ -1417,14 +1480,9 @@ function updateAITimedState(player: mod.Player): void {
         current.aiActionUntil = -1;
     }
 
-    if (
-        current.vehicleStartPosition !== undefined &&
-        current.vehicleEnteredAt >= 0 &&
-        elapsed - current.vehicleEnteredAt >= 10 &&
-        mod.GetSoldierState(player, mod.SoldierStateBool.IsInVehicle)
-    ) {
+    if (current.vehicleStartPosition !== undefined && current.vehicleEnteredAt >= 0 && elapsed - current.vehicleEnteredAt >= 10 && safeGetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) {
         if (mod.DistanceBetween(mod.GetObjectPosition(player), current.vehicleStartPosition) < 3) {
-            mod.ForcePlayerExitVehicle(player, mod.GetVehicleFromPlayer(player));
+            safeForcePlayerExitVehicle(player);
         }
         current.vehicleStartPosition = undefined;
         current.vehicleEnteredAt = -1;
@@ -1435,7 +1493,7 @@ function countAIPlayers(players: mod.Array): number {
     let count = 0;
     for (let i = 0; i < countPortalArray(players); i += 1) {
         const player = portalArrayValue<mod.Player>(players, i);
-        if (mod.IsPlayerValid(player) && mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) count += 1;
+        if (safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) count += 1;
     }
     return count;
 }
@@ -1459,7 +1517,7 @@ function countSquadReconDroneUsers(player: mod.Player): number {
         if (
             mod.IsPlayerValid(other) &&
             mod.Equals(mod.GetSquad(other), squad) &&
-            mod.HasEquipment(other, mod.Gadgets.Deployable_Recon_Drone)
+            safeHasEquipment(other, mod.Gadgets.Deployable_Recon_Drone)
         ) {
             count += 1;
         }
@@ -1469,9 +1527,9 @@ function countSquadReconDroneUsers(player: mod.Player): number {
 }
 
 function enforceSquadReconDroneLimit(player: mod.Player): void {
-    if (!mod.HasEquipment(player, mod.Gadgets.Deployable_Recon_Drone)) return;
+    if (!safeHasEquipment(player, mod.Gadgets.Deployable_Recon_Drone)) return;
     if (countSquadReconDroneUsers(player) <= MAX_RECON_DRONES_PER_SQUAD) return;
-    mod.RemoveEquipment(player, mod.Gadgets.Deployable_Recon_Drone);
+    safeRemoveEquipment(player, mod.Gadgets.Deployable_Recon_Drone);
 }
 
 // Picks an enemy or neutral objective for AI movement. Falls back to the first point when all are friendly.
@@ -1498,7 +1556,7 @@ function chooseNearestObjective(player: mod.Player): mod.CapturePoint {
 
 // Sends AI toward an objective after deploy, capture-point entry, vehicle exit, or move failure.
 function sendAIToObjective(player: mod.Player): void {
-    if (!mod.IsPlayerValid(player) || !mod.GetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
+    if (!safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) return;
     if (playerState(player).aiInAction) return;
     const objective = chooseNearestObjective(player);
     playerState(player).aiTarget = objective;
@@ -1541,18 +1599,30 @@ export function OnPlayerJoinGame(eventPlayer: mod.Player): void {
 // Portal event: resets temporary player state and gives optional NVG equipment.
 export function OnPlayerDeployed(eventPlayer: mod.Player): void {
     const current = playerState(eventPlayer);
+    current.deployed = true;
     untrackPlayerFromCurrentPoint(eventPlayer);
     current.onPoint = false;
     current.outOfBounds = false;
     current.currentCapturePointId = -1;
     current.captureTick = 0;
+    current.blockReviveUntilDeploy = false;
     resetPlayerCaptureHudCache(eventPlayer);
     setPlayerObjectiveVisible(eventPlayer, false);
-    if (state.givePlayersNVG) mod.AddEquipment(eventPlayer, mod.Gadgets.Mask_NVG);
-    enforceSquadReconDroneLimit(eventPlayer);
-    sendAIToObjective(eventPlayer);
-    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
-        mod.SetPlayerIncomingDamageFactor(eventPlayer, 0.5);
+    startPostDeploySetup(eventPlayer);
+}
+
+function startPostDeploySetup(player: mod.Player): void {
+    void runPostDeploySetup(player);
+}
+
+async function runPostDeploySetup(player: mod.Player): Promise<void> {
+    await mod.Wait(0.5);
+    if (!mod.IsPlayerValid(player) || !playerState(player).deployed) return;
+    if (state.givePlayersNVG) mod.AddEquipment(player, mod.Gadgets.Mask_NVG);
+    enforceSquadReconDroneLimit(player);
+    sendAIToObjective(player);
+    if (safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
+        mod.SetPlayerIncomingDamageFactor(player, 0.5);
     }
 }
 
@@ -1560,8 +1630,9 @@ export function OnPlayerDeployed(eventPlayer: mod.Player): void {
 export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Player, _eventDeathType: mod.DeathType, _eventWeaponUnlock: mod.WeaponUnlock): void {
     void _eventDeathType;
     void _eventWeaponUnlock;
-    if (!state.gameOngoing) return;
     const current = playerState(eventPlayer);
+    current.deployed = false;
+    if (!state.gameOngoing) return;
     untrackPlayerFromCurrentPoint(eventPlayer);
     current.onPoint = false;
     current.currentCapturePointId = -1;
@@ -1573,6 +1644,17 @@ export function OnPlayerDied(eventPlayer: mod.Player, eventOtherPlayer: mod.Play
     if (mod.IsPlayerValid(eventOtherPlayer)) playerState(eventPlayer).aiTarget = eventOtherPlayer;
     updateAllHud();
     checkEndGame();
+}
+
+export function OnPlayerUndeploy(eventPlayer: mod.Player): void {
+    const current = playerState(eventPlayer);
+    current.deployed = false;
+    untrackPlayerFromCurrentPoint(eventPlayer);
+    current.onPoint = false;
+    current.currentCapturePointId = -1;
+    current.captureTick = 0;
+    resetPlayerCaptureHudCache(eventPlayer);
+    setPlayerObjectiveVisible(eventPlayer, false);
 }
 
 // Portal event: awards score and kill count for enemy kills.
@@ -1592,6 +1674,10 @@ export function OnPlayerEarnedKillAssist(eventPlayer: mod.Player, eventOtherPlay
 // Portal event: awards revive score to the reviving player.
 export function OnRevived(eventPlayer: mod.Player, eventOtherPlayer: mod.Player): void {
     if (!mod.IsPlayerValid(eventOtherPlayer)) return;
+    if (playerState(eventPlayer).blockReviveUntilDeploy) {
+        safeForceManDown(eventPlayer);
+        return;
+    }
     addPlayerScore(eventOtherPlayer, 20, PlayerVar.Revives);
     updatePlayerScoreboard(eventPlayer);
 }
@@ -1704,8 +1790,30 @@ export function OnPlayerExitCapturePoint(eventPlayer: mod.Player, _eventCaptureP
 export function OnPlayerInteract(eventPlayer: mod.Player, eventInteractPoint: mod.InteractPoint): void {
     if (!state.enableTeamSwitching) return;
     const id = mod.GetObjId(eventInteractPoint);
-    if (id === TEAM_1_SWITCHER_INTERACT_ID && canSwitchToTeam(eventPlayer, team(TEAM_1_ID))) mod.SetTeam(eventPlayer, team(TEAM_1_ID));
-    if (id === TEAM_2_SWITCHER_INTERACT_ID && canSwitchToTeam(eventPlayer, team(TEAM_2_ID))) mod.SetTeam(eventPlayer, team(TEAM_2_ID));
+    if (id === TEAM_1_SWITCHER_INTERACT_ID) {
+        trySwitchTeam(eventPlayer, TEAM_1_ID);
+        return;
+    }
+    if (id === TEAM_2_SWITCHER_INTERACT_ID) {
+        trySwitchTeam(eventPlayer, TEAM_2_ID);
+        return;
+    }
+}
+
+function trySwitchTeam(player: mod.Player, targetTeamId: number): void {
+    const targetTeam = team(targetTeamId);
+    const allowed = canSwitchToTeam(player, targetTeam);
+    if (allowed) {
+        mod.SetTeam(player, targetTeam);
+        forceTeamSwitcherDeath(player);
+    }
+}
+
+function forceTeamSwitcherDeath(player: mod.Player): void {
+    const current = playerState(player);
+    current.blockReviveUntilDeploy = true;
+    safeForcePlayerExitVehicle(player);
+    safeForceManDown(player);
 }
 
 // Portal event: shows the out-of-bounds warning UI when enabled.
@@ -1730,9 +1838,9 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
     void _eventWeaponUnlock;
     if (!mod.IsPlayerValid(eventPlayer) || !mod.IsPlayerValid(eventOtherPlayer)) return;
     if (
-        mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) &&
+        safeGetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier) &&
         !playerState(eventPlayer).aiInAction &&
-        !mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle) &&
+        !safeGetSoldierState(eventPlayer, mod.SoldierStateBool.IsInVehicle) &&
         !mod.Equals(mod.GetTeam(eventPlayer), mod.GetTeam(eventOtherPlayer))
     ) {
         const current = playerState(eventPlayer);
@@ -1748,7 +1856,7 @@ export function OnPlayerDamaged(eventPlayer: mod.Player, eventOtherPlayer: mod.P
 // Portal event: returns AI to battlefield behavior when entering a vehicle.
 export function OnPlayerEnterVehicle(eventPlayer: mod.Player, _eventVehicle: mod.Vehicle): void {
     void _eventVehicle;
-    if (mod.GetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
+    if (safeGetSoldierState(eventPlayer, mod.SoldierStateBool.IsAISoldier)) {
         mod.AIBattlefieldBehavior(eventPlayer);
         playerState(eventPlayer).vehicleStartPosition = mod.GetObjectPosition(eventPlayer);
         playerState(eventPlayer).vehicleEnteredAt = mod.GetMatchTimeElapsed();
