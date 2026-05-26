@@ -5,13 +5,9 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "strict": true,
-    "typeRoots": [
-      "./node_modules/@types",
-      "C:/Users/sasaq/Desktop/PortalSDK (5)/code/types"
-    ],
     "paths": {
       "modlib": [
-        "C:/Users/sasaq/Desktop/PortalSDK (5)/code/modlib"
+        "./code/modlib"
       ]
     }
   }
