@@ -1627,7 +1627,7 @@ async function runPostDeploySetup(player: mod.Player): Promise<void> {
     enforceSquadReconDroneLimit(player);
     sendAIToObjective(player);
     if (safeGetSoldierState(player, mod.SoldierStateBool.IsAISoldier)) {
-        mod.SetPlayerIncomingDamageFactor(player, 0.5);
+        mod.SetPlayerIncomingDamageFactor(player, 1);
     }
 }
 
