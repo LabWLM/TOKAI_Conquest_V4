@@ -577,6 +577,25 @@ function safeForceManDown(player: mod.Player): void {
     }
 }
 
+const OOB_FORCE_MANDOWN_SECONDS = 5;
+
+async function runOobForceManDownTimer(player: mod.Player): Promise<void> {
+    await mod.Wait(OOB_FORCE_MANDOWN_SECONDS);
+
+    if (!mod.IsPlayerValid(player)) return;
+
+    const current = playerState(player);
+
+    if (!state.enableOOB) return;
+    if (!current.deployed) return;
+    if (!current.outOfBounds) return;
+    if (current.ignoreOOB) return;
+
+    safeForceManDown(player);
+}
+
+
+
 function safeForcePlayerExitVehicle(player: mod.Player): void {
     if (!safeGetSoldierState(player, mod.SoldierStateBool.IsInVehicle)) return;
     try {
@@ -1821,13 +1840,14 @@ function forceTeamSwitcherDeath(player: mod.Player): void {
     safeForceManDown(player);
 }
 
-// Portal event: shows the out-of-bounds warning UI when enabled.
+// Portal event: shows the out-of-bounds warning UI when enabled, and forces man down if the player stays inside.
 export function OnPlayerEnterAreaTrigger(eventPlayer: mod.Player, _eventAreaTrigger: mod.AreaTrigger): void {
     void _eventAreaTrigger;
     const current = playerState(eventPlayer);
     if (!state.enableOOB || current.ignoreOOB) return;
     current.outOfBounds = true;
     setPlayerOobVisible(eventPlayer, true);
+    void runOobForceManDownTimer(eventPlayer);
 }
 
 // Portal event: hides the out-of-bounds warning UI.
